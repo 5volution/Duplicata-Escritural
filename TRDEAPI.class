@@ -1,0 +1,621 @@
+/*
+   Classe: TRDEAPI
+   Descrição: Cliente para API RDE - Escrituração e Registro de Duplicatas
+   Autor: Jose Carlos da Rocha - 5Volution Desenvolvimento
+   Data: 2024
+*/
+
+#include "hbclass.ch" // https://github.com/harbour/core/blob/master/include/hbclass.ch
+#include "hbcurl.ch"  // https://github.com/harbour/core/blob/master/contrib/hbcurl/hbcurl.ch
+
+CLASS TRDEAPI
+
+   DATA cBaseURL INIT "https://duplicatas.b3.com.br/api/"
+   DATA cToken INIT ""
+   DATA cSandboxURL INIT "https://duplicatas-cer.b3.com.br/api/"
+   DATA lSandbox INIT .F.
+   DATA hHeaders INIT {=>}
+   DATA nTimeout INIT 30
+   DATA cLastError INIT ""
+   DATA cLastResponse INIT ""
+
+   METHOD New( cToken, lSandbox )
+   METHOD SetToken( cToken )
+   METHOD SetSandbox( lSandbox )
+   METHOD SetTimeout( nTimeout )
+   METHOD GetHeaders()
+   METHOD Request( cMethod, cEndpoint, hParams, cBody )
+   METHOD ProcessResponse( cResponse, nHttpCode )
+
+   // === MÉTODOS DOS ENDPOINTS ===
+
+   // POST /v1/duplicatas/manual
+   METHOD PostDuplicataManualV1( hData )
+   
+   // POST /v2/duplicatas/manual
+   METHOD PostDuplicataManualV2( hData )
+   
+   // POST /v1/duplicatas
+   METHOD PostDuplicata( hData )
+   
+   // GET /v1/duplicatas
+   METHOD GetDuplicatas( hParams )
+   
+   // GET /v1/duplicatas/{idDuplicata}
+   METHOD GetDuplicataById( cIdDuplicata, cNumeroOrdem )
+   
+   // GET /v2/duplicatas/{idDuplicata}
+   METHOD GetDuplicataByIdV2( cIdDuplicata, cNumeroOrdem )
+   
+   // PATCH /v1/duplicatas/{idDuplicata}
+   METHOD PatchDuplicata( cIdDuplicata, hData )
+   
+   // PATCH /v1/duplicatas/{idDuplicata}/baixa
+   METHOD PatchBaixaDuplicata( cIdDuplicata, hData )
+   
+   // POST /v1/duplicatas/{idDuplicata}/protesto
+   METHOD PostProtestoDuplicata( cIdDuplicata, hData )
+   
+   // PATCH /v1/duplicatas/{idDuplicata}/protesto/baixa
+   METHOD PatchBaixaProtesto( cIdDuplicata, hData )
+   
+   // POST /liquidacao/v1/duplicatas
+   METHOD PostLiquidacao( hData )
+   
+   // GET /liquidacao/v1/duplicatas/{idProcessamento}/{idDuplicata}
+   METHOD GetLiquidacaoDuplicata( cIdProcessamento, cIdDuplicata )
+   
+   // POST /v1/duplicatas/{idDuplicata}/liquidacao
+   METHOD PostLiquidacaoDuplicata( cIdDuplicata, hData )
+   
+   // GET /v1/duplicatas/processamento/{idProcessamento}
+   METHOD GetProcessamento( cIdProcessamento )
+
+ENDCLASS
+
+// ============================================================
+// CONSTRUTOR E MÉTODOS AUXILIARES
+// ============================================================
+
+METHOD New( cToken, lSandbox ) CLASS TRDEAPI
+   DEFAULT cToken TO ""
+   DEFAULT lSandbox TO .F.
+
+   ::cToken := cToken
+   ::lSandbox := lSandbox
+   ::hHeaders := {=>}
+   ::hHeaders["Content-Type"] := "application/json"
+   ::hHeaders["Accept"] := "application/json"
+   
+   IF !Empty( cToken )
+      ::hHeaders["Authorization"] := cToken
+   ENDIF
+   
+   ::cLastError := ""
+   ::cLastResponse := ""
+   
+RETURN Self
+
+METHOD SetToken( cToken ) CLASS TRDEAPI
+   ::cToken := cToken
+   IF !Empty( cToken )
+      ::hHeaders["Authorization"] := cToken
+   ELSE
+      hb_HDel( ::hHeaders, "Authorization" )
+   ENDIF
+RETURN Self
+
+METHOD SetSandbox( lSandbox ) CLASS TRDEAPI
+   ::lSandbox := lSandbox
+RETURN Self
+
+METHOD SetTimeout( nTimeout ) CLASS TRDEAPI
+   ::nTimeout := nTimeout
+RETURN Self
+
+METHOD GetHeaders() CLASS TRDEAPI
+   LOCAL aHeaders := {}
+   LOCAL cKey, cValue
+
+   FOR EACH cKey IN hb_HKeys( ::hHeaders )
+      cValue := ::hHeaders[cKey]
+      AAdd( aHeaders, cKey + ": " + cValue )
+   NEXT
+
+RETURN aHeaders
+
+// ============================================================
+// MÉTODO PRINCIPAL DE REQUISIÇÃO HTTP
+// ============================================================
+
+METHOD Request( cMethod, cEndpoint, hParams, cBody ) CLASS TRDEAPI
+   LOCAL cURL, cResponse, nHttpCode, hCurl
+   LOCAL aHeaders, cQuery := "", cFullURL
+   LOCAL cKey, cValue
+
+   ::cLastError := ""
+   ::cLastResponse := ""
+
+   // Monta URL base
+   IF ::lSandbox
+      cURL := ::cSandboxURL
+   ELSE
+      cURL := ::cBaseURL
+   ENDIF
+   
+   // Remove barras duplicadas
+   cURL := RTrim( cURL )
+   IF Right( cURL, 1 ) == "/"
+      cURL := Left( cURL, Len( cURL ) - 1 )
+   ENDIF
+   
+   cEndpoint := RTrim( cEndpoint )
+   IF Left( cEndpoint, 1 ) == "/"
+      cEndpoint := SubStr( cEndpoint, 2 )
+   ENDIF
+   
+   cFullURL := cURL + "/" + cEndpoint
+
+   // Adiciona parâmetros query
+   IF hParams != NIL .AND. hb_HLen( hParams ) > 0
+      cQuery := "?"
+      FOR EACH cKey IN hb_HKeys( hParams )
+         IF !Empty( cQuery ) .AND. cQuery != "?"
+            cQuery += "&"
+         ENDIF
+         cValue := hParams[cKey]
+         cQuery += cKey + "=" + hb_UrlEncode( cValue )
+      NEXT
+      cFullURL += cQuery
+   ENDIF
+
+   // Inicializa cURL
+   hCurl := curl_easy_init()
+   IF hCurl == NIL
+      ::cLastError := "Falha ao inicializar cURL"
+      RETURN NIL
+   ENDIF
+
+   // Configura a URL
+   curl_easy_setopt( hCurl, HB_CURLOPT_URL, cFullURL )
+   
+   // Configura timeout
+   curl_easy_setopt( hCurl, HB_CURLOPT_TIMEOUT, ::nTimeout )
+   
+   // Configura método
+   cMethod := Upper( cMethod )
+   DO CASE
+      CASE cMethod == "GET"
+         curl_easy_setopt( hCurl, HB_CURLOPT_HTTPGET, 1 )
+      CASE cMethod == "POST"
+         curl_easy_setopt( hCurl, HB_CURLOPT_POST, 1 )
+      CASE cMethod == "PUT"
+         curl_easy_setopt( hCurl, HB_CURLOPT_CUSTOMREQUEST, "PUT" )
+      CASE cMethod == "PATCH"
+         curl_easy_setopt( hCurl, HB_CURLOPT_CUSTOMREQUEST, "PATCH" )
+      CASE cMethod == "DELETE"
+         curl_easy_setopt( hCurl, HB_CURLOPT_CUSTOMREQUEST, "DELETE" )
+      OTHERWISE
+         curl_easy_setopt( hCurl, HB_CURLOPT_CUSTOMREQUEST, cMethod )
+   ENDCASE
+
+   // Configura body se houver
+   IF cBody != NIL .AND. !Empty( cBody )
+      curl_easy_setopt( hCurl, HB_CURLOPT_POSTFIELDS, cBody )
+   ENDIF
+
+   // Configura headers
+   aHeaders := ::GetHeaders()
+   IF Len( aHeaders ) > 0
+      curl_easy_setopt( hCurl, HB_CURLOPT_HTTPHEADER, aHeaders )
+   ENDIF
+
+   // Configura SSL (aceita self-signed para testes)
+   curl_easy_setopt( hCurl, HB_CURLOPT_SSL_VERIFYPEER, 0 )
+   curl_easy_setopt( hCurl, HB_CURLOPT_SSL_VERIFYHOST, 0 )
+
+   // Captura resposta
+   curl_easy_setopt( hCurl, HB_CURLOPT_WRITEFUNCTION, {|cData| cResponse += cData } )
+
+   // Executa requisição
+   nHttpCode := curl_easy_perform( hCurl )
+   
+   // Obtém código HTTP
+   curl_easy_getinfo( hCurl, HB_CURLINFO_RESPONSE_CODE, @nHttpCode )
+
+   // Limpa
+   curl_easy_cleanup( hCurl )
+
+   ::cLastResponse := cResponse
+   
+   RETURN ::ProcessResponse( cResponse, nHttpCode )
+
+// ============================================================
+// PROCESSAMENTO DE RESPOSTA
+// ============================================================
+
+METHOD ProcessResponse( cResponse, nHttpCode ) CLASS TRDEAPI
+   LOCAL hResult := {=>}
+   LOCAL hJson := NIL
+   
+   hJson := hb_JsonDecode( cResponse )
+   
+   hResult["success"] := ( nHttpCode >= 200 .AND. nHttpCode < 300 )
+   hResult["status_code"] := nHttpCode
+   hResult["raw_response"] := cResponse
+   hResult["data"] := hJson
+   
+   IF !hResult["success"]
+      hResult["error"] := "HTTP " + hb_ntos( nHttpCode )
+      IF hJson != NIL .AND. hb_HHasKey( hJson, "erros" )
+         hResult["errors"] := hJson["erros"]
+      ENDIF
+   ENDIF
+   
+RETURN hResult
+
+// ============================================================
+// IMPLEMENTAÇÃO DOS ENDPOINTS
+// ============================================================
+
+// --- POST /v1/duplicatas/manual ---
+METHOD PostDuplicataManualV1( hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "POST", "v1/duplicatas/manual", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== POST /v1/duplicatas/manual ==="
+      ? "Status:", hResult["status_code"]
+      ? "ID Processamento:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- POST /v2/duplicatas/manual ---
+METHOD PostDuplicataManualV2( hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "POST", "v2/duplicatas/manual", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== POST /v2/duplicatas/manual ==="
+      ? "Status:", hResult["status_code"]
+      ? "ID Processamento:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- POST /v1/duplicatas ---
+METHOD PostDuplicata( hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "POST", "v1/duplicatas", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== POST /v1/duplicatas ==="
+      ? "Status:", hResult["status_code"]
+      ? "Protocolo:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- GET /v1/duplicatas ---
+METHOD GetDuplicatas( hParams ) CLASS TRDEAPI
+   LOCAL hResult
+   LOCAL hDefaultParams := {=>}
+   
+   hDefaultParams["page"] := "1"
+   hDefaultParams["page-size"] := "10"
+   
+   IF hParams != NIL
+      hb_HMerge( hDefaultParams, hParams )
+   ENDIF
+   
+   hResult := ::Request( "GET", "v1/duplicatas", hDefaultParams, NIL )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== GET /v1/duplicatas ==="
+      ? "Status:", hResult["status_code"]
+      ? "Total Registros:", hb_JsonEncode( hb_HGetDef( hResult["data"], "meta", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- GET /v1/duplicatas/{idDuplicata} ---
+METHOD GetDuplicataById( cIdDuplicata, cNumeroOrdem ) CLASS TRDEAPI
+   LOCAL hParams := {=>}, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF !Empty( cNumeroOrdem )
+      hParams["numeroOrdem"] := cNumeroOrdem
+   ENDIF
+   
+   hResult := ::Request( "GET", "v1/duplicatas/" + cIdDuplicata, hParams, NIL )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== GET /v1/duplicatas/" + cIdDuplicata + " ==="
+      ? "Status:", hResult["status_code"]
+      ? "Dados:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- GET /v2/duplicatas/{idDuplicata} ---
+METHOD GetDuplicataByIdV2( cIdDuplicata, cNumeroOrdem ) CLASS TRDEAPI
+   LOCAL hParams := {=>}, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF !Empty( cNumeroOrdem )
+      hParams["numeroOrdem"] := cNumeroOrdem
+   ENDIF
+   
+   hResult := ::Request( "GET", "v2/duplicatas/" + cIdDuplicata, hParams, NIL )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== GET /v2/duplicatas/" + cIdDuplicata + " ==="
+      ? "Status:", hResult["status_code"]
+      ? "Dados:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- PATCH /v1/duplicatas/{idDuplicata} ---
+METHOD PatchDuplicata( cIdDuplicata, hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "PATCH", "v1/duplicatas/" + cIdDuplicata, NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== PATCH /v1/duplicatas/" + cIdDuplicata + " ==="
+      ? "Status:", hResult["status_code"]
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- PATCH /v1/duplicatas/{idDuplicata}/baixa ---
+METHOD PatchBaixaDuplicata( cIdDuplicata, hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "PATCH", "v1/duplicatas/" + cIdDuplicata + "/baixa", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== PATCH /v1/duplicatas/" + cIdDuplicata + "/baixa ==="
+      ? "Status:", hResult["status_code"]
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- POST /v1/duplicatas/{idDuplicata}/protesto ---
+METHOD PostProtestoDuplicata( cIdDuplicata, hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "POST", "v1/duplicatas/" + cIdDuplicata + "/protesto", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== POST /v1/duplicatas/" + cIdDuplicata + "/protesto ==="
+      ? "Status:", hResult["status_code"]
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- PATCH /v1/duplicatas/{idDuplicata}/protesto/baixa ---
+METHOD PatchBaixaProtesto( cIdDuplicata, hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "PATCH", "v1/duplicatas/" + cIdDuplicata + "/protesto/baixa", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== PATCH /v1/duplicatas/" + cIdDuplicata + "/protesto/baixa ==="
+      ? "Status:", hResult["status_code"]
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- POST /liquidacao/v1/duplicatas ---
+METHOD PostLiquidacao( hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "POST", "liquidacao/v1/duplicatas", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== POST /liquidacao/v1/duplicatas ==="
+      ? "Status:", hResult["status_code"]
+      ? "ID Processamento:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- GET /liquidacao/v1/duplicatas/{idProcessamento}/{idDuplicata} ---
+METHOD GetLiquidacaoDuplicata( cIdProcessamento, cIdDuplicata ) CLASS TRDEAPI
+   LOCAL hResult
+   
+   IF Empty( cIdProcessamento ) .OR. Empty( cIdDuplicata )
+      ::cLastError := "ID Processamento ou ID Duplicata não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   hResult := ::Request( "GET", "liquidacao/v1/duplicatas/" + cIdProcessamento + "/" + cIdDuplicata, NIL, NIL )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== GET /liquidacao/v1/duplicatas/" + cIdProcessamento + "/" + cIdDuplicata + " ==="
+      ? "Status:", hResult["status_code"]
+      ? "Dados:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- POST /v1/duplicatas/{idDuplicata}/liquidacao ---
+METHOD PostLiquidacaoDuplicata( cIdDuplicata, hData ) CLASS TRDEAPI
+   LOCAL cBody, hResult
+   
+   IF Empty( cIdDuplicata )
+      ::cLastError := "ID da duplicata não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   IF hData == NIL
+      ::cLastError := "Dados não fornecidos"
+      RETURN NIL
+   ENDIF
+   
+   cBody := hb_JsonEncode( hData )
+   hResult := ::Request( "POST", "v1/duplicatas/" + cIdDuplicata + "/liquidacao", NIL, cBody )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== POST /v1/duplicatas/" + cIdDuplicata + "/liquidacao ==="
+      ? "Status:", hResult["status_code"]
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
+
+// --- GET /v1/duplicatas/processamento/{idProcessamento} ---
+METHOD GetProcessamento( cIdProcessamento ) CLASS TRDEAPI
+   LOCAL hResult
+   
+   IF Empty( cIdProcessamento )
+      ::cLastError := "ID Processamento não fornecido"
+      RETURN NIL
+   ENDIF
+   
+   hResult := ::Request( "GET", "v1/duplicatas/processamento/" + cIdProcessamento, NIL, NIL )
+   
+   IF hResult != NIL .AND. hResult["success"]
+      ? "=== GET /v1/duplicatas/processamento/" + cIdProcessamento + " ==="
+      ? "Status:", hResult["status_code"]
+      ? "Dados:", hb_JsonEncode( hb_HGetDef( hResult["data"], "data", {=>} ) )
+      ? "Resposta:", hResult["raw_response"]
+   ELSEIF hResult != NIL
+      ::cLastError := hb_HGetDef( hResult, "error", "Erro desconhecido" )
+      ? "Erro:", ::cLastError
+   ENDIF
+   
+RETURN hResult
